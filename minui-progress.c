@@ -57,8 +57,8 @@ enum
 #define BAR_HEIGHT 12
 // how often the progress file is read
 #define POLL_MS 100
-// the indeterminate bar: a segment this fraction of the track, sweeping across
-// and back once per this many milliseconds
+// the indeterminate bar: a segment this fraction of the track, crossing it
+// left to right and wrapping round once per this many milliseconds
 #define SWEEP_FRACTION 0.28
 #define SWEEP_MS 1600
 
@@ -156,27 +156,45 @@ static uint32_t fill_color(void)
 #endif
 }
 
-// fill_pill fills a rect with fully rounded ends, one scanline per row: each
-// row of the end caps is inset by how far the circle curves in at that height.
-static void fill_pill(SDL_Surface *dst, SDL_Rect rect, uint32_t color)
+// pill_span gives the columns a pill covers on one of its rows, as [*x0, *x1)
+static void pill_span(SDL_Rect rect, int row, int *x0, int *x1)
 {
     int h = rect.h;
     int r = h / 2;
     if (rect.w < h)
         rect.w = h;
+    double dy = (row + 0.5) - h / 2.0;
+    double inset = r - sqrt((double)r * r - dy * dy);
+    if (inset < 0)
+        inset = 0;
+    int in = (int)(inset + 0.5);
+    *x0 = rect.x + in;
+    *x1 = rect.x + rect.w - in;
+}
 
-    for (int row = 0; row < h; row++)
+// fill_pill_within fills a pill but only where it overlaps the clip pill (same
+// y and height), so a segment half off the end of the track is cut by the
+// track's own rounded end rather than drawing a cap of its own there
+static void fill_pill_within(SDL_Surface *dst, SDL_Rect rect, SDL_Rect clip, uint32_t color)
+{
+    for (int row = 0; row < rect.h; row++)
     {
-        // distance of this row's centre from the pill's horizontal midline
-        double dy = (row + 0.5) - h / 2.0;
-        double inset = r - sqrt((double)r * r - dy * dy);
-        if (inset < 0)
-            inset = 0;
-        int in = (int)(inset + 0.5);
-        SDL_Rect line = {rect.x + in, rect.y + row, rect.w - in * 2, 1};
+        int a0, a1, b0, b1;
+        pill_span(rect, row, &a0, &a1);
+        pill_span(clip, row, &b0, &b1);
+        int x0 = a0 > b0 ? a0 : b0;
+        int x1 = a1 < b1 ? a1 : b1;
+        SDL_Rect line = {x0, rect.y + row, x1 - x0, 1};
         if (line.w > 0)
             SDL_FillRect(dst, &line, color);
     }
+}
+
+// fill_pill fills a rect with fully rounded ends, one scanline per row: each
+// row of the end caps is inset by how far the circle curves in at that height.
+static void fill_pill(SDL_Surface *dst, SDL_Rect rect, uint32_t color)
+{
+    fill_pill_within(dst, rect, rect, color);
 }
 
 static void blit_track(SDL_Surface *dst, SDL_Rect *rect)
@@ -288,13 +306,15 @@ void draw_screen(SDL_Surface *dst, struct AppState *state)
 
     if (state->progress.indeterminate)
     {
-        // ping-pong a segment across the track
+        // run a segment left to right and round again: as it slides off the
+        // right end, the same segment slides back in from the left
         int seg = (int)(width * SWEEP_FRACTION);
         double phase = (double)(now_ms() % SWEEP_MS) / SWEEP_MS; // 0..1
-        double t = phase < 0.5 ? phase * 2 : (1 - phase) * 2;     // 0..1..0
-        int sx = margin + (int)((width - seg) * t);
+        int sx = margin + (int)(width * phase);
         SDL_Rect fill = {sx, y, seg, bar_h};
-        blit_fill(dst, &fill);
+        SDL_Rect wrap = {sx - width, y, seg, bar_h};
+        fill_pill_within(dst, fill, track, fill_color());
+        fill_pill_within(dst, wrap, track, fill_color());
     }
     else if (state->shown_percent > 0)
     {
